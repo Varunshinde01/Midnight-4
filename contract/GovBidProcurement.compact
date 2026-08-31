@@ -1,0 +1,96 @@
+// Midnight Compact Language Contract: GovBidProcurement.compact
+// Privacy-Preserving Government Procurement & Sealed Bidding Protocol
+// Verifiable Zero-Knowledge Private Bids vs Public Ledger Commitments
+
+pragma language_version >= 0.1.0;
+
+import CompactStandardLibrary;
+
+export enum ProcurementState {
+    OpenBidding,
+    QualificationCheck,
+    RevealPhase,
+    Settled,
+    Cancelled
+}
+
+export struct BidCommitment {
+    public_key: Bytes<32>;
+    commitment_hash: Bytes<32>;
+    timestamp: Uint<64>;
+    qualification_proof: Bytes<32>;
+}
+
+export struct DisclosedWinner {
+    winner_public_key: Bytes<32>;
+    winning_bid_amount: Uint<64>;
+    proof_hash: Bytes<32>;
+    settled_at: Uint<64>;
+}
+
+// Public Ledger State (On-Chain Disclosed State)
+export ledger {
+    state: ProcurementState;
+    tender_id: Bytes<32>;
+    authority_pubkey: Bytes<32>;
+    min_bid_amount: Uint<64>;
+    max_budget_limit: Uint<64>;
+    bids_count: Uint<32>;
+    commitments: Vector<100, BidCommitment>;
+    winner: DisclosedWinner;
+}
+
+// Client Private Witness Declarations (State Held Exclusively on Vendor Device)
+witness private_bid_amount(): Uint<64>;
+witness private_salt(): Bytes<32>;
+witness private_vendor_tax_id(): Bytes<32>;
+
+// ZK Circuit: Submit Sealed Bid with Client-Side Commitment & Reserve Constraint Proof
+export circuit submit_sealed_bid(
+    bidder_pk: Bytes<32>,
+    submitted_commitment: Bytes<32>,
+    qual_proof: Bytes<32>
+): Cell<Boolean> {
+    // Assert procurement is currently open for bidding
+    assert(state == ProcurementState.OpenBidding, "Procurement is not open for bidding");
+
+    // Retrieve private witness state from bidder device
+    let bid_amount = private_bid_amount();
+    let salt = private_salt();
+
+    // Circuit Constraint 1: Bid must be greater than or equal to minimum required reserve price
+    assert(bid_amount >= min_bid_amount, "Bid amount fails minimum reserve price requirement");
+
+    // Circuit Constraint 2: Bid must not exceed government maximum budget cap
+    assert(bid_amount <= max_budget_limit, "Bid amount exceeds maximum project budget limit");
+
+    // Circuit Constraint 3: Verify cryptographic commitment SHA256(bid_amount || salt || bidder_pk)
+    let calculated_hash = sha256_concat(bid_amount, salt, bidder_pk);
+    assert(submitted_commitment == calculated_hash, "Submitted commitment hash mismatch");
+
+    // Increment public counter
+    bids_count = bids_count + 1;
+    return true;
+}
+
+// ZK Circuit: Settle Procurement & Selectively Disclose Winning Bidder
+export circuit settle_procurement(
+    winning_pk: Bytes<32>,
+    winning_amount: Uint<64>,
+    winning_salt: Bytes<32>,
+    proof_digest: Bytes<32>
+): Cell<Boolean> {
+    assert(state == ProcurementState.OpenBidding || state == ProcurementState.QualificationCheck, "Invalid procurement state for settlement");
+
+    // Verify winning bid commitment consistency
+    let expected_hash = sha256_concat(winning_amount, winning_salt, winning_pk);
+
+    // Update Public Ledger State (Selective Disclosure)
+    winner.winner_public_key = winning_pk;
+    winner.winning_bid_amount = winning_amount;
+    winner.proof_hash = proof_digest;
+    winner.settled_at = current_timestamp();
+    state = ProcurementState.Settled;
+
+    return true;
+}

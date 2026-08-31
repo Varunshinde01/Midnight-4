@@ -1,6 +1,6 @@
 # GovBid Midnight — Confidential Government Procurement & Sealed-Bid Platform
 
-[![CI/CD Pipeline](https://github.com/username/Midnight-GovBid/actions/workflows/ci.yml/badge.svg)](https://github.com/username/Midnight-GovBid/actions/workflows/ci.yml)
+[![CI/CD Pipeline](https://github.com/Varunshinde01/Midnight-4/actions/workflows/ci.yml/badge.svg)](https://github.com/Varunshinde01/Midnight-4/actions/workflows/ci.yml)
 ![Midnight Preprod Testnet](https://img.shields.io/badge/Midnight-Preprod%20Testnet-6366f1)
 ![Compact Smart Contract](https://img.shields.io/badge/Compact%20DSL-v0.1.0-8b5cf6)
 ![License](https://img.shields.io/badge/License-MIT-10b981)
@@ -123,8 +123,8 @@ npm test
 
 ```bash
 # 1. Clone the repository
-git clone https://github.com/username/Midnight-GovBid.git
-cd Midnight-GovBid
+git clone https://github.com/Varunshinde01/Midnight-4.git
+cd Midnight-4
 
 # 2. Install dependencies
 npm install

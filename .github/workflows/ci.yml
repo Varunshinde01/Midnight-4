@@ -1,0 +1,41 @@
+name: GovBid Midnight CI/CD Pipeline
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+
+jobs:
+  test-and-build:
+    name: Build, Test & Validate Compact Smart Contract
+    runs-on: ubuntu-latest
+
+    strategy:
+      matrix:
+        node-version: [20.x, 22.x]
+
+    steps:
+      - name: Checkout Repository Source
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js Environment (${{ matrix.node-version }})
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: 'npm'
+
+      - name: Install Clean Dependencies
+        run: npm ci
+
+      - name: Run Vitest Unit & ZK Witness Suite
+        run: npm test
+
+      - name: Compile Vite Production Build
+        run: npm run build
+
+      - name: Verify Compact Smart Contract Source Existence
+        run: |
+          test -f contract/GovBidProcurement.compact || (echo "GovBidProcurement.compact missing!" && exit 1)
+          test -f contract/GovBidProcurement.ts || (echo "GovBidProcurement.ts missing!" && exit 1)
+          echo "GovBid Midnight Compact smart contract verified successfully."

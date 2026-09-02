@@ -15,7 +15,6 @@ export enum ProcurementState {
 }
 
 export struct BidCommitment {
-    public_key: Bytes<32>;
     commitment_hash: Bytes<32>;
     timestamp: Uint<64>;
     qualification_proof: Bytes<32>;
@@ -47,7 +46,6 @@ witness private_vendor_tax_id(): Bytes<32>;
 
 // ZK Circuit: Submit Sealed Bid with Client-Side Commitment & Reserve Constraint Proof
 export circuit submit_sealed_bid(
-    bidder_pk: Bytes<32>,
     submitted_commitment: Bytes<32>,
     qual_proof: Bytes<32>
 ): Cell<Boolean> {
@@ -57,6 +55,7 @@ export circuit submit_sealed_bid(
     // Retrieve private witness state from bidder device
     let bid_amount = private_bid_amount();
     let salt = private_salt();
+    let vendor_tax_id = private_vendor_tax_id();
 
     // Circuit Constraint 1: Bid must be greater than or equal to minimum required reserve price
     assert(bid_amount >= min_bid_amount, "Bid amount fails minimum reserve price requirement");
@@ -64,8 +63,8 @@ export circuit submit_sealed_bid(
     // Circuit Constraint 2: Bid must not exceed government maximum budget cap
     assert(bid_amount <= max_budget_limit, "Bid amount exceeds maximum project budget limit");
 
-    // Circuit Constraint 3: Verify cryptographic commitment SHA256(bid_amount || salt || bidder_pk)
-    let calculated_hash = sha256_concat(bid_amount, salt, bidder_pk);
+    // Circuit Constraint 3: Verify cryptographic commitment SHA256(bid_amount || salt || vendor_tax_id)
+    let calculated_hash = sha256_concat(bid_amount, salt, vendor_tax_id);
     assert(submitted_commitment == calculated_hash, "Submitted commitment hash mismatch");
 
     // Increment public counter
@@ -78,12 +77,14 @@ export circuit settle_procurement(
     winning_pk: Bytes<32>,
     winning_amount: Uint<64>,
     winning_salt: Bytes<32>,
+    winning_commitment_hash: Bytes<32>,
     proof_digest: Bytes<32>
 ): Cell<Boolean> {
     assert(state == ProcurementState.OpenBidding || state == ProcurementState.QualificationCheck, "Invalid procurement state for settlement");
 
-    // Verify winning bid commitment consistency
+    // Verify winning bid commitment consistency: SHA256(winning_amount || winning_salt || winning_pk)
     let expected_hash = sha256_concat(winning_amount, winning_salt, winning_pk);
+    assert(expected_hash == winning_commitment_hash, "Winning bid commitment verification failed: disclosed parameters do not match commitment digest");
 
     // Update Public Ledger State (Selective Disclosure)
     winner.winner_public_key = winning_pk;

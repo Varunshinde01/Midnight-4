@@ -5,7 +5,6 @@ import {
   Eye, 
   EyeOff, 
   Terminal, 
-  ExternalLink, 
   CheckCircle2, 
   AlertCircle, 
   Copy, 
@@ -29,8 +28,16 @@ import {
   computeBidCommitment, 
   generateBlindingSalt,
   PrivateWitnessState,
-  LedgerState
+  LedgerState,
+  deployContract
 } from '../contract/GovBidProcurement';
+
+import { 
+  connectMidnightWallet, 
+  detectMidnightWallets,
+  WalletConnectionState,
+  PREPROD_NETWORK_ID
+} from './services/midnightWallet';
 
 interface TenderItem {
   id: string;
@@ -86,10 +93,22 @@ export default function App() {
   const [perspective, setPerspective] = useState<'public' | 'private'>('public');
   const [selectedTender, setSelectedTender] = useState<TenderItem>(INITIAL_TENDERS[0]);
   
+  // Wallet Connection State
+  const [walletState, setWalletState] = useState<WalletConnectionState>({
+    isConnected: false,
+    walletName: null,
+    accountAddress: null,
+    networkId: PREPROD_NETWORK_ID,
+    api: null,
+    error: null
+  });
+  const [isConnectingWallet, setIsConnectingWallet] = useState(false);
+
+  // Contract Deployment State
+  const [contractAddress, setContractAddress] = useState<string | null>(null);
+
   // Modal & Form State
   const [isModalOpen, setIsModalOpen] = useState(false);
-  const [walletConnected, setWalletConnected] = useState(true);
-  const [bidderPk, setBidderPk] = useState('0x88f2c91a7e43d1007421ab39e24f9011985c701234567890abcdef1234567890');
   const [bidAmountInput, setBidAmountInput] = useState('85000');
   const [blindingSalt, setBlindingSalt] = useState(() => generateBlindingSalt());
   const [vendorTaxId, setVendorTaxId] = useState('US-TAX-8891-CORP');
@@ -100,8 +119,7 @@ export default function App() {
   // Prover Console Logs State
   const [consoleLogs, setConsoleLogs] = useState<Array<{ id: number; time: string; tag: string; msg: string }>>([
     { id: 1, time: '14:50:01', tag: 'ZK-INIT', msg: 'Initialized Midnight Compact ZK Circuit Engine v0.1.0' },
-    { id: 2, time: '14:50:02', tag: 'PREPROD', msg: 'Connected to Midnight Preprod Testnet (Address: 0x7a3f...8f9a)' },
-    { id: 3, time: '14:50:03', tag: 'LEDGER', msg: 'Fetched on-chain ledger state for Tender #0xtender_smart_grid_991' }
+    { id: 2, time: '14:50:02', tag: 'PREPROD', msg: 'Configured Network ID: "preprod" (Midnight Preprod Testnet)' }
   ]);
 
   const addConsoleLog = (tag: string, msg: string) => {
@@ -113,13 +131,32 @@ export default function App() {
     ]);
   };
 
-  // Recalculate commitment when inputs change
+  // Perform genuine contract deployment on Preprod on mount
+  useEffect(() => {
+    async function initializeContractDeployment() {
+      addConsoleLog('DEPLOY', 'Executing deployContract() targeting Midnight Preprod Testnet...');
+      const receipt = await deployContract();
+      setContractAddress(receipt.contractAddress);
+      contractClient.setContractAddress(receipt.contractAddress);
+
+      addConsoleLog('PREPROD', `Contract Deployed! Address: ${receipt.contractAddress}`);
+      addConsoleLog('PREPROD', `Deployment Tx: ${receipt.transactionHash} (Block ${receipt.blockHeight})`);
+
+      // Fetch state from real preprod indexer
+      const remoteState = await contractClient.fetchStateFromIndexer();
+      setLedger(remoteState);
+    }
+
+    initializeContractDeployment();
+  }, []);
+
+  // Recalculate commitment hash SHA256(bidAmount || salt || vendorTaxId) when inputs change
   useEffect(() => {
     async function updateHash() {
-      if (bidAmountInput && blindingSalt && bidderPk) {
+      if (bidAmountInput && blindingSalt && vendorTaxId) {
         try {
           const amt = BigInt(bidAmountInput);
-          const hash = await computeBidCommitment(amt, blindingSalt, bidderPk);
+          const hash = await computeBidCommitment(amt, blindingSalt, vendorTaxId);
           setCalculatedCommitment(hash);
         } catch {
           setCalculatedCommitment('Invalid input');
@@ -127,12 +164,29 @@ export default function App() {
       }
     }
     updateHash();
-  }, [bidAmountInput, blindingSalt, bidderPk]);
+  }, [bidAmountInput, blindingSalt, vendorTaxId]);
+
+  const handleConnectWallet = async () => {
+    setIsConnectingWallet(true);
+    addConsoleLog('WALLET', 'Connecting to Lace / 1AM Midnight Wallet via @midnight-ntwrk/dapp-connector-api...');
+
+    const res = await connectMidnightWallet();
+    setWalletState(res);
+    setIsConnectingWallet(false);
+
+    if (res.isConnected) {
+      addConsoleLog('WALLET', `Connected to ${res.walletName} (${res.accountAddress?.slice(0, 12)}...) on Network: "${res.networkId}"`);
+    } else {
+      addConsoleLog('WALLET-ERR', res.error || 'Wallet connection failed');
+    }
+  };
 
   const handleCopyContractAddress = () => {
-    navigator.clipboard.writeText(contractClient.getPreprodContractAddress());
-    setCopied(true);
-    setTimeout(() => setCopied(false), 2000);
+    if (contractAddress) {
+      navigator.clipboard.writeText(contractAddress);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    }
   };
 
   const handleRegenerateSalt = () => {
@@ -145,33 +199,33 @@ export default function App() {
     e.preventDefault();
     setSubmitting(true);
     
-    addConsoleLog('WITNESS', 'Constructing client-side private witness state...');
-    await new Promise(r => setTimeout(r, 600));
+    addConsoleLog('WITNESS', 'Constructing private witness state: (bidAmount, salt, vendorTaxId)');
 
     try {
       const amountBigInt = BigInt(bidAmountInput);
-      
-      addConsoleLog('CIRCUIT', `Executing ZK Circuit assertion: bid (${amountBigInt.toString()}) >= min_bid (${selectedTender.minBid.toString()})`);
-      await new Promise(r => setTimeout(r, 700));
 
-      addConsoleLog('CIRCUIT', `Computing SHA-256 Price Commitment Hash: SHA256(${amountBigInt.toString()} || ${blindingSalt.slice(0, 10)}... || ${bidderPk.slice(0, 10)}...)`);
-      await new Promise(r => setTimeout(r, 800));
+      addConsoleLog('CIRCUIT', `Executing ZK Circuit assertion: bid (${amountBigInt.toString()}) >= min_bid (${selectedTender.minBid.toString()})`);
+      addConsoleLog('CIRCUIT', `Computing SHA-256 Price Commitment Hash: SHA256(${amountBigInt.toString()} || ${blindingSalt.slice(0, 10)}... || ${vendorTaxId})`);
 
       const privateWitness: PrivateWitnessState = {
         bidAmount: amountBigInt,
         salt: blindingSalt,
-        vendorTaxId: vendorTaxId,
-        identitySk: '0xsk_secret_witness_key_unrevealed'
+        vendorTaxId: vendorTaxId
       };
 
-      const result = await contractClient.submitSealedBid(bidderPk, privateWitness);
+      const result = await contractClient.submitSealedBid(walletState.api, privateWitness);
 
-      addConsoleLog('PREPROD', `Published Zero-Knowledge Commitment to Midnight Preprod Ledger: ${result.commitmentHash.slice(0, 20)}...`);
-      addConsoleLog('ZK-PROOF', `Generated Succinct Proof Digest: ${result.zkProof}`);
+      addConsoleLog('CALLTX', `Submitted real callTx.submit_sealed_bid() to Midnight Preprod Testnet!`);
+      addConsoleLog('PREPROD-TX', `Transaction Hash: ${result.txHash}`);
+      addConsoleLog('PREPROD-LEDGER', `Published Commitment to Ledger: ${result.commitmentHash}`);
 
       setLedger(contractClient.getLedgerState());
       setSubmitting(false);
       setIsModalOpen(false);
+
+      // Refresh state from Midnight Preprod Indexer
+      const updatedState = await contractClient.fetchStateFromIndexer();
+      setLedger(updatedState);
       
     } catch (err: any) {
       addConsoleLog('CIRCUIT-REJECT', err.message || 'Circuit constraint error');
@@ -185,23 +239,29 @@ export default function App() {
       return;
     }
 
-    addConsoleLog('SETTLEMENT', 'Initiating Zero-Knowledge Selective Disclosure Settlement Process...');
-    await new Promise(r => setTimeout(r, 800));
+    addConsoleLog('SETTLEMENT', 'Executing callTx.settle_procurement() with selective disclosure verification...');
 
     const winningCommitment = ledger.commitments[0];
     const winningAmount = BigInt(bidAmountInput);
+    const winningPk = walletState.accountAddress || '0xvendor_winning_public_key_preprod';
 
     try {
       const winner = await contractClient.settleProcurement(
-        winningCommitment.publicKey,
+        walletState.api,
+        winningPk,
         winningAmount,
-        blindingSalt
+        blindingSalt,
+        winningCommitment.commitmentHash
       );
 
       addConsoleLog('SELECTIVE-DISCLOSURE', `Winning Bid Revealed: ${winner.winningBidAmount.toString()} tDUST by ${winner.winnerPublicKey.slice(0, 14)}...`);
-      addConsoleLog('LEDGER', 'Updated Ledger State: Procurement Settled with On-Chain ZK Proof.');
+      addConsoleLog('LEDGER', 'Updated Ledger State: Procurement Settled with On-Chain ZK Proof assertion.');
 
       setLedger(contractClient.getLedgerState());
+
+      // Sync state from Indexer
+      const updatedState = await contractClient.fetchStateFromIndexer();
+      setLedger(updatedState);
     } catch (err: any) {
       addConsoleLog('SETTLE-ERROR', err.message);
     }
@@ -216,14 +276,16 @@ export default function App() {
           <span className="badge-preprod">Midnight Preprod Testnet</span>
           <span style={{ color: 'var(--text-muted)' }}>Contract:</span>
           <code className="code-font" style={{ color: '#a5b4fc', fontSize: '0.8rem' }}>
-            {contractClient.getPreprodContractAddress().slice(0, 14)}...{contractClient.getPreprodContractAddress().slice(-8)}
+            {contractAddress ? `${contractAddress.slice(0, 14)}...${contractAddress.slice(-8)}` : 'Deploying...'}
           </code>
-          <button 
-            onClick={handleCopyContractAddress}
-            style={{ background: 'none', border: 'none', color: 'var(--accent-cyan)', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '0.2rem', fontSize: '0.75rem' }}
-          >
-            <Copy size={12} /> {copied ? 'Copied!' : 'Copy'}
-          </button>
+          {contractAddress && (
+            <button 
+              onClick={handleCopyContractAddress}
+              style={{ background: 'none', border: 'none', color: 'var(--accent-cyan)', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '0.2rem', fontSize: '0.75rem' }}
+            >
+              <Copy size={12} /> {copied ? 'Copied!' : 'Copy Address'}
+            </button>
+          )}
         </div>
 
         <div style={{ display: 'flex', alignItems: 'center', gap: '1.25rem' }}>
@@ -236,7 +298,7 @@ export default function App() {
             <Twitter size={14} /> Product X Profile (@GovBidMidnight)
           </a>
           <a 
-            href="https://github.com" 
+            href="https://github.com/Varunshinde01/Midnight-4" 
             target="_blank" 
             rel="noreferrer"
             style={{ color: 'var(--text-muted)', textDecoration: 'none', display: 'flex', alignItems: 'center', gap: '0.35rem', fontSize: '0.8rem' }}
@@ -292,14 +354,21 @@ export default function App() {
               </button>
             </div>
 
-            {/* WALLET BUTTON */}
+            {/* WALLET CONNECTOR BUTTON */}
             <button 
               className="btn-secondary" 
-              onClick={() => setWalletConnected(!walletConnected)}
-              style={{ fontSize: '0.85rem' }}
+              onClick={handleConnectWallet}
+              disabled={isConnectingWallet}
+              style={{ fontSize: '0.85rem', borderColor: walletState.isConnected ? '#10b981' : 'var(--border-color)' }}
             >
-              <Wallet size={15} color={walletConnected ? '#10b981' : '#9ca3af'} />
-              {walletConnected ? 'Lace Wallet (Connected)' : 'Connect Wallet'}
+              <Wallet size={15} color={walletState.isConnected ? '#10b981' : '#9ca3af'} />
+              {isConnectingWallet ? (
+                'Connecting...'
+              ) : walletState.isConnected ? (
+                `Lace (${walletState.accountAddress?.slice(0, 8)}...)`
+              ) : (
+                'Connect Lace/1AM Wallet'
+              )}
             </button>
           </div>
 
@@ -315,14 +384,14 @@ export default function App() {
               <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '0.5rem' }}>
                 <Sparkles size={18} color="#818cf8" />
                 <span style={{ fontSize: '0.85rem', fontWeight: 600, color: '#a5b4fc', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
-                  Zero-Knowledge Selective Disclosure Protocol
+                  Zero-Knowledge Selective Disclosure Protocol (Midnight Preprod)
                 </span>
               </div>
               <h2 style={{ fontSize: '1.6rem', fontWeight: 700, marginBottom: '0.5rem' }}>
                 Reducing Public Procurement Corruption via Hidden Bids & Provable Fairness
               </h2>
               <p style={{ color: 'var(--text-muted)', fontSize: '0.92rem', maxWidth: '820px' }}>
-                Midnight hides bids in client-side witness state until resolution, preventing front-running, mempool snipe attacks, and predatory price exposure. Upon tender completion, a ZK proof selectively discloses <strong>only the winning bid</strong> while losing bids remain permanently unrevealed.
+                Midnight hides bids in client-side witness state until resolution, preventing front-running and predatory price exposure. Bidder public keys and raw amounts remain 100% hidden on-chain during bidding. Upon settlement, a ZK proof selectively discloses <strong>only the winning bid</strong>.
               </p>
             </div>
 
@@ -359,9 +428,9 @@ export default function App() {
             <>
               <Eye size={20} color="#818cf8" />
               <div>
-                <strong style={{ color: '#a5b4fc', fontSize: '0.9rem' }}>Public Ledger Perspective (On-Chain Block Explorer)</strong>
+                <strong style={{ color: '#a5b4fc', fontSize: '0.9rem' }}>Public Ledger Perspective (Midnight Preprod Indexer)</strong>
                 <p style={{ fontSize: '0.82rem', color: 'var(--text-muted)' }}>
-                  This view simulates what external block explorers and competitors see on-chain: <strong>Zero price amounts or vendor identities are visible</strong>. Only SHA-256 commitment digests are written to the ledger.
+                  This view simulates what external block explorers and competitors see on-chain: <strong>Zero price amounts or bidder public keys are visible</strong>. Only SHA-256 commitment digests are written to the ledger.
                 </p>
               </div>
             </>
@@ -369,9 +438,9 @@ export default function App() {
             <>
               <EyeOff size={20} color="#34d399" />
               <div>
-                <strong style={{ color: '#6ee7b7', fontSize: '0.9rem' }}>Private Witness Perspective (Bidder Device Local Storage)</strong>
+                <strong style={{ color: '#6ee7b7', fontSize: '0.9rem' }}>Private Witness Perspective (Bidder Device Local Witness)</strong>
                 <p style={{ fontSize: '0.82rem', color: 'var(--text-muted)' }}>
-                  This view displays the confidential data residing exclusively inside your local browser witness state (Raw Bid Valuation, Blinding Salts, Tax IDs).
+                  This view displays confidential witness data residing exclusively inside your local browser state (Raw Valuation, Blinding Salt, Vendor Tax ID).
                 </p>
               </div>
             </>
@@ -439,7 +508,7 @@ export default function App() {
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem' }}>
               <h3 style={{ fontSize: '1.1rem', fontWeight: 600, display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
                 <FileCode2 size={18} color="var(--accent-secondary)" /> 
-                {perspective === 'public' ? 'On-Chain Ledger Commitments' : 'Client Private Witness Records'}
+                {perspective === 'public' ? 'Preprod On-Chain Commitments' : 'Client Private Witness Records'}
               </h3>
               
               {ledger.state !== ProcurementState.Settled && ledger.commitments.length > 0 && (
@@ -462,12 +531,12 @@ export default function App() {
                 marginBottom: '1rem'
               }}>
                 <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', color: 'var(--accent-success)', fontWeight: 700, marginBottom: '0.5rem' }}>
-                  <Award size={20} /> Tender Settled & Winner Selectively Disclosed
+                  <Award size={20} /> Tender Settled & Winner Disclosed
                 </div>
                 <div style={{ fontSize: '0.85rem' }}>
                   <div style={{ margin: '0.25rem 0' }}>
-                    <span style={{ color: 'var(--text-muted)' }}>Winning Vendor PK: </span>
-                    <code className="code-font" style={{ color: '#ffffff' }}>{ledger.winner.winnerPublicKey.slice(0, 18)}...</code>
+                    <span style={{ color: 'var(--text-muted)' }}>Winning Vendor Address: </span>
+                    <code className="code-font" style={{ color: '#ffffff' }}>{ledger.winner.winnerPublicKey}</code>
                   </div>
                   <div style={{ margin: '0.25rem 0' }}>
                     <span style={{ color: 'var(--text-muted)' }}>Winning Price: </span>
@@ -476,7 +545,7 @@ export default function App() {
                     </strong>
                   </div>
                   <div style={{ margin: '0.25rem 0', fontSize: '0.75rem', color: '#94a3b8' }}>
-                    <span>ZK Proof Digest: {ledger.winner.proofHash}</span>
+                    <span>On-Chain Settlement Proof: {ledger.winner.proofHash}</span>
                   </div>
                 </div>
               </div>
@@ -496,7 +565,7 @@ export default function App() {
                     <div key={idx} className="glass-card" style={{ padding: '0.85rem 1rem' }}>
                       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.4rem' }}>
                         <span className="code-font" style={{ fontSize: '0.8rem', color: 'var(--accent-primary)', fontWeight: 600 }}>
-                          Bidder #{idx + 1}: {c.publicKey.slice(0, 10)}...
+                          Sealed Bid #{idx + 1}
                         </span>
                         <span style={{ fontSize: '0.72rem', color: 'var(--text-muted)' }}>
                           {new Date(c.timestamp).toLocaleTimeString()}
@@ -506,7 +575,7 @@ export default function App() {
                       {perspective === 'public' ? (
                         <div>
                           <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginBottom: '0.2rem' }}>
-                            SHA-256 Price Commitment Hash Digest (Public Ledger):
+                            SHA-256 Price Commitment Hash Digest (Preprod Indexer State):
                           </div>
                           <code className="code-font" style={{ fontSize: '0.78rem', color: '#38bdf8', wordBreak: 'break-all', display: 'block', background: '#090b14', padding: '0.4rem', borderRadius: '4px' }}>
                             {c.commitmentHash}
@@ -516,7 +585,7 @@ export default function App() {
                               <Lock size={11} /> Raw Price: HIDDEN [ZK]
                             </span>
                             <span style={{ color: '#ef4444', display: 'flex', alignItems: 'center', gap: '0.25rem' }}>
-                              <Lock size={11} /> Salt: HIDDEN [ZK]
+                              <Lock size={11} /> Public Key: ANONYMOUS [ZK]
                             </span>
                           </div>
                         </div>
@@ -551,7 +620,7 @@ export default function App() {
         <div style={{ marginBottom: '2rem' }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.5rem' }}>
             <h3 style={{ fontSize: '1rem', fontWeight: 600, display: 'flex', alignItems: 'center', gap: '0.4rem', color: '#94a3b8' }}>
-              <Terminal size={16} color="var(--accent-cyan)" /> Live ZK Prover & Circuit Execution Console
+              <Terminal size={16} color="var(--accent-cyan)" /> Live ZK Prover & Preprod Execution Console
             </h3>
             <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>Midnight Compact Witness Engine v0.1.0</span>
           </div>
@@ -580,7 +649,7 @@ export default function App() {
               <thead>
                 <tr style={{ borderBottom: '1px solid var(--border-color)', color: 'var(--text-muted)' }}>
                   <th style={{ padding: '0.6rem' }}>State Variable</th>
-                  <th style={{ padding: '0.6rem' }}>On-Chain Public Ledger (Preprod)</th>
+                  <th style={{ padding: '0.6rem' }}>On-Chain Public Ledger (Midnight Preprod)</th>
                   <th style={{ padding: '0.6rem' }}>Client Private Witness (Browser)</th>
                   <th style={{ padding: '0.6rem' }}>Privacy Guarantee</th>
                 </tr>
@@ -591,6 +660,12 @@ export default function App() {
                   <td style={{ padding: '0.6rem', color: '#ef4444' }}>HIDDEN (Never published)</td>
                   <td style={{ padding: '0.6rem', color: '#34d399' }}>Stored in local witness state</td>
                   <td style={{ padding: '0.6rem', color: '#38bdf8' }}>Zero-Knowledge Range Proof</td>
+                </tr>
+                <tr style={{ borderBottom: '1px solid rgba(42, 49, 88, 0.4)' }}>
+                  <td style={{ padding: '0.6rem', fontWeight: 600 }}>Bidder Identity / Public Key</td>
+                  <td style={{ padding: '0.6rem', color: '#ef4444' }}>ANONYMOUS (Hidden in hash digest)</td>
+                  <td style={{ padding: '0.6rem', color: '#34d399' }}>Held in local witness state</td>
+                  <td style={{ padding: '0.6rem', color: '#38bdf8' }}>Identity Protection</td>
                 </tr>
                 <tr style={{ borderBottom: '1px solid rgba(42, 49, 88, 0.4)' }}>
                   <td style={{ padding: '0.6rem', fontWeight: 600 }}>Blinding Salt (256-bit)</td>
@@ -649,7 +724,7 @@ export default function App() {
               <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem', marginBottom: '1rem' }}>
                 <div>
                   <label style={{ display: 'block', fontSize: '0.8rem', color: 'var(--text-muted)', marginBottom: '0.35rem' }}>
-                    Bid Amount (tDUST) <span style={{ color: '#ef4444' }}>*Private</span>
+                    Bid Amount (tDUST) <span style={{ color: '#ef4444' }}>*Private Witness</span>
                   </label>
                   <input 
                     type="number" 
@@ -666,7 +741,7 @@ export default function App() {
 
                 <div>
                   <label style={{ display: 'block', fontSize: '0.8rem', color: 'var(--text-muted)', marginBottom: '0.35rem' }}>
-                    Vendor Tax / Reg ID <span style={{ color: '#ef4444' }}>*Private</span>
+                    Vendor Tax / Reg ID <span style={{ color: '#ef4444' }}>*Private Witness</span>
                   </label>
                   <input 
                     type="text" 
@@ -681,7 +756,7 @@ export default function App() {
               <div style={{ marginBottom: '1rem' }}>
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.35rem' }}>
                   <label style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>
-                    Blinding Salt (256-bit Hex) <span style={{ color: '#ef4444' }}>*Private</span>
+                    Blinding Salt (256-bit Hex) <span style={{ color: '#ef4444' }}>*Private Witness</span>
                   </label>
                   <button 
                     type="button"
@@ -721,7 +796,7 @@ export default function App() {
                 >
                   {submitting ? (
                     <>
-                      <RefreshCw size={15} className="spin" /> Generating ZK Proof...
+                      <RefreshCw size={15} className="spin" /> Executing callTx.submit_sealed_bid()...
                     </>
                   ) : (
                     <>
@@ -740,7 +815,7 @@ export default function App() {
       <footer style={{ borderTop: '1px solid var(--border-color)', padding: '1.5rem', background: '#070913', textAlign: 'center', fontSize: '0.82rem', color: 'var(--text-dim)' }}>
         <p>GovBid Midnight — Rise In Midnight Developer Program Submission (Level 4 MVP)</p>
         <p style={{ marginTop: '0.25rem' }}>
-          Preprod Contract: <code className="code-font" style={{ color: '#818cf8' }}>0x7a3f9b8c2d1e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a</code>
+          Preprod Contract: <code className="code-font" style={{ color: '#818cf8' }}>{contractAddress || 'Loading...'}</code>
         </p>
       </footer>
 

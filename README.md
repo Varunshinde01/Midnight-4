@@ -4,13 +4,13 @@
 ![Midnight Preprod Testnet](https://img.shields.io/badge/Midnight-Preprod%20Testnet-6366f1)
 ![Compact Smart Contract](https://img.shields.io/badge/Compact%20DSL-v0.1.0-8b5cf6)
 ![License](https://img.shields.io/badge/License-MIT-10b981)
-[![Product X Profile](https://img.shields.io/badge/X%20(Twitter)-%40GovBidMidnight-000000?logo=x)](https://x.com/GovBidMidnight)
+[![Product X Profile](https://img.shields.io/badge/X%20(Twitter)-%40govbidmidnight-000000?logo=x)](https://x.com/govbidmidnight)
 
 > **Submitted for**: Rise In Midnight Developer Program — Level 4 Submission  
 > **Preprod Network ID**: `preprod`  
 > **Preprod Contract Address**: `0x020088f1a23b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6a7b8c9d`  
 > **Deployment Tx Hash**: `0x3a9b2c8f1e4d7a0b5c8e2f4a7b1c4d9e2f5a8b1c4d7e0f3a6b9c2d5e8f1a4b7c` (Block `1849204`)  
-> **Product X (Twitter) Profile**: [https://x.com/GovBidMidnight](https://x.com/GovBidMidnight)  
+> **Product X (Twitter) Profile**: [https://x.com/govbidmidnight](https://x.com/govbidmidnight)  
 
 ---
 

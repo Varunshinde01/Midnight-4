@@ -44,7 +44,7 @@ witness private_bid_amount(): Uint<64>;
 witness private_salt(): Bytes<32>;
 witness private_vendor_tax_id(): Bytes<32>;
 
-// ZK Circuit: Submit Sealed Bid with Client-Side Commitment & Reserve Constraint Proof
+// ZK Circuit: Submit Sealed Bid with Client-Side Commitment, Reserve Constraint & Qualification Proof
 export circuit submit_sealed_bid(
     submitted_commitment: Bytes<32>,
     qual_proof: Bytes<32>
@@ -63,9 +63,27 @@ export circuit submit_sealed_bid(
     // Circuit Constraint 2: Bid must not exceed government maximum budget cap
     assert(bid_amount <= max_budget_limit, "Bid amount exceeds maximum project budget limit");
 
-    // Circuit Constraint 3: Verify cryptographic commitment SHA256(bid_amount || salt || vendor_tax_id)
+    // Circuit Constraint 3: Real qualification proof verification sha256_concat(vendor_tax_id, authority_pubkey)
+    let expected_qual_proof = sha256_concat(vendor_tax_id, authority_pubkey);
+    assert(qual_proof == expected_qual_proof, "Vendor qualification proof verification failed");
+
+    // Circuit Constraint 4: Canonical commitment verification SHA256(bid_amount || salt || vendor_tax_id)
     let calculated_hash = sha256_concat(bid_amount, salt, vendor_tax_id);
     assert(submitted_commitment == calculated_hash, "Submitted commitment hash mismatch");
+
+    // Circuit Constraint 5: Replay Protection - check that submitted commitment is not already registered in ledger commitments vector
+    for i in 0..100 {
+        if i < bids_count {
+            assert(commitments[i].commitment_hash != submitted_commitment, "Replay protection error: Commitment already registered on ledger");
+        }
+    }
+
+    // Append verified commitment to authoritative ledger vector
+    commitments[bids_count] = BidCommitment {
+        commitment_hash: submitted_commitment,
+        timestamp: current_timestamp(),
+        qualification_proof: qual_proof
+    };
 
     // Increment public counter
     bids_count = bids_count + 1;
@@ -74,17 +92,36 @@ export circuit submit_sealed_bid(
 
 // ZK Circuit: Settle Procurement & Selectively Disclose Winning Bidder
 export circuit settle_procurement(
+    caller_authority_pk: Bytes<32>,
     winning_pk: Bytes<32>,
     winning_amount: Uint<64>,
     winning_salt: Bytes<32>,
     winning_commitment_hash: Bytes<32>,
     proof_digest: Bytes<32>
 ): Cell<Boolean> {
+    // Enforce Procurement Authority Authorization
+    assert(caller_authority_pk == authority_pubkey, "Unauthorized: Caller is not the registered procurement authority");
+
     assert(state == ProcurementState.OpenBidding || state == ProcurementState.QualificationCheck, "Invalid procurement state for settlement");
 
-    // Verify winning bid commitment consistency: SHA256(winning_amount || winning_salt || winning_pk)
+    // Verify that winning_commitment_hash is present in authoritative ledger commitments vector
+    let mutable commitment_found: Boolean = false;
+    for i in 0..100 {
+        if i < bids_count {
+            if commitments[i].commitment_hash == winning_commitment_hash {
+                commitment_found = true;
+            }
+        }
+    }
+    assert(commitment_found, "Settlement failed: Winning commitment not found in registered ledger state");
+
+    // Verify canonical winning bid commitment consistency: SHA256(winning_amount || winning_salt || winning_pk)
     let expected_hash = sha256_concat(winning_amount, winning_salt, winning_pk);
     assert(expected_hash == winning_commitment_hash, "Winning bid commitment verification failed: disclosed parameters do not match commitment digest");
+
+    // Enforce auction reserve invariants for winning bid
+    assert(winning_amount >= min_bid_amount, "Winning bid amount fails minimum reserve requirement");
+    assert(winning_amount <= max_budget_limit, "Winning bid amount exceeds maximum budget limit");
 
     // Update Public Ledger State (Selective Disclosure)
     winner.winner_public_key = winning_pk;

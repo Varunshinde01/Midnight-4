@@ -135,16 +135,25 @@ export default function App() {
   useEffect(() => {
     async function initializeContractDeployment() {
       addConsoleLog('DEPLOY', 'Executing deployContract() targeting Midnight Preprod Testnet...');
-      const receipt = await deployContract();
-      setContractAddress(receipt.contractAddress);
-      contractClient.setContractAddress(receipt.contractAddress);
+      try {
+        const receipt = await deployContract();
+        setContractAddress(receipt.contractAddress);
+        contractClient.setContractAddress(receipt.contractAddress);
 
-      addConsoleLog('PREPROD', `Contract Deployed! Address: ${receipt.contractAddress}`);
-      addConsoleLog('PREPROD', `Deployment Tx: ${receipt.transactionHash} (Block ${receipt.blockHeight})`);
+        addConsoleLog('PREPROD', `Contract Deployed! Address: ${receipt.contractAddress}`);
+        addConsoleLog('PREPROD', `Deployment Tx: ${receipt.transactionHash} (Block ${receipt.blockHeight})`);
 
-      // Fetch state from real preprod indexer
-      const remoteState = await contractClient.fetchStateFromIndexer();
-      setLedger(remoteState);
+        // Fetch state from real preprod indexer with explicit error logging
+        try {
+          const remoteState = await contractClient.fetchStateFromIndexer();
+          setLedger(remoteState);
+          addConsoleLog('INDEXER', 'State successfully synchronized with Preprod Indexer.');
+        } catch (indexerErr: any) {
+          addConsoleLog('INDEXER-STATUS', indexerErr.message);
+        }
+      } catch (deployErr: any) {
+        addConsoleLog('DEPLOY-ERR', deployErr.message);
+      }
     }
 
     initializeContractDeployment();
@@ -205,7 +214,7 @@ export default function App() {
       const amountBigInt = BigInt(bidAmountInput);
 
       addConsoleLog('CIRCUIT', `Executing ZK Circuit assertion: bid (${amountBigInt.toString()}) >= min_bid (${selectedTender.minBid.toString()})`);
-      addConsoleLog('CIRCUIT', `Computing SHA-256 Price Commitment Hash: SHA256(${amountBigInt.toString()} || ${blindingSalt.slice(0, 10)}... || ${vendorTaxId})`);
+      addConsoleLog('CIRCUIT', `Computing Canonical Price Commitment Hash: SHA256(bidAmount || salt || vendorTaxId)`);
 
       const privateWitness: PrivateWitnessState = {
         bidAmount: amountBigInt,
@@ -224,8 +233,12 @@ export default function App() {
       setIsModalOpen(false);
 
       // Refresh state from Midnight Preprod Indexer
-      const updatedState = await contractClient.fetchStateFromIndexer();
-      setLedger(updatedState);
+      try {
+        const updatedState = await contractClient.fetchStateFromIndexer();
+        setLedger(updatedState);
+      } catch (indexerErr: any) {
+        addConsoleLog('INDEXER-STATUS', indexerErr.message);
+      }
       
     } catch (err: any) {
       addConsoleLog('CIRCUIT-REJECT', err.message || 'Circuit constraint error');
@@ -244,10 +257,12 @@ export default function App() {
     const winningCommitment = ledger.commitments[0];
     const winningAmount = BigInt(bidAmountInput);
     const winningPk = walletState.accountAddress || '0xvendor_winning_public_key_preprod';
+    const authorityPk = ledger.authorityPubkey;
 
     try {
       const winner = await contractClient.settleProcurement(
         walletState.api,
+        authorityPk,
         winningPk,
         winningAmount,
         blindingSalt,
@@ -260,8 +275,12 @@ export default function App() {
       setLedger(contractClient.getLedgerState());
 
       // Sync state from Indexer
-      const updatedState = await contractClient.fetchStateFromIndexer();
-      setLedger(updatedState);
+      try {
+        const updatedState = await contractClient.fetchStateFromIndexer();
+        setLedger(updatedState);
+      } catch (indexerErr: any) {
+        addConsoleLog('INDEXER-STATUS', indexerErr.message);
+      }
     } catch (err: any) {
       addConsoleLog('SETTLE-ERROR', err.message);
     }

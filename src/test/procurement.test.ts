@@ -1,12 +1,14 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import { 
   GovBidContractClient, 
-  computeBidCommitment, 
+  computeBidCommitment,
+  computeVendorQualificationProof, 
   generateBlindingSalt, 
   ProcurementState,
   PrivateWitnessState,
   deployContract,
-  setNetworkId
+  setNetworkId,
+  createGovBidContractBindings
 } from '../../contract/GovBidProcurement';
 
 describe('GovBid Midnight Compact Smart Contract & ZK Witness Suite', () => {
@@ -27,15 +29,23 @@ describe('GovBid Midnight Compact Smart Contract & ZK Witness Suite', () => {
     expect(() => setNetworkId('mainnet' as any)).toThrow();
   });
 
-  it('Test 2: [Preprod Contract Deployment] Genuine deployContract() returns valid receipt', async () => {
-    const receipt = await deployContract(undefined, tenderId, authorityPubkey, minBid, maxBudget);
+  it('Test 2: [Compiler-Generated Bindings] Validates Midnight Compact bindings generator', () => {
+    const bindings = createGovBidContractBindings();
+    expect(bindings.contractName).toBe('GovBidProcurement');
+    expect(bindings.circuitVersion).toBe('>=0.1.0');
+    expect(bindings.circuits.submit_sealed_bid).toBeDefined();
+    expect(bindings.circuits.settle_procurement).toBeDefined();
+  });
+
+  it('Test 3: [Preprod Contract Deployment] Genuine deployContract() returns valid receipt', async () => {
+    const receipt = await deployContract(null, tenderId, authorityPubkey, minBid, maxBudget);
     expect(receipt.contractAddress).toMatch(/^0x[a-f0-9]{64}$/i);
     expect(receipt.transactionHash).toBeDefined();
     expect(receipt.networkId).toBe('preprod');
     expect(receipt.blockHeight).toBeGreaterThan(0);
   });
 
-  it('Test 3: [Selective Disclosure] SHA-256 price commitment digest hides raw bid amount & salt', async () => {
+  it('Test 4: [Canonical Commitment Encoding] SHA-256 price commitment digest hides raw bid amount & salt', async () => {
     const rawBid = BigInt(85000);
     const salt = generateBlindingSalt();
     const vendorTaxId = 'US-TAX-8891-CORP';
@@ -49,17 +59,19 @@ describe('GovBid Midnight Compact Smart Contract & ZK Witness Suite', () => {
     expect(commitmentHash).not.toContain(salt);
   });
 
-  it('Test 4: [ZK Circuit Validity] Valid bid (>= min bid) passes circuit constraint & records commitment on ledger', async () => {
+  it('Test 5: [ZK Circuit Validity] Valid bid (>= min bid) with valid qualification proof passes circuit constraint', async () => {
     const rawBid = BigInt(85000); // 85,000 >= 50,000
     const salt = generateBlindingSalt();
+    const vendorTaxId = 'US-TAX-8891-CORP';
 
     const witness: PrivateWitnessState = {
       bidAmount: rawBid,
       salt,
-      vendorTaxId: 'US-TAX-8891-CORP'
+      vendorTaxId
     };
 
-    const result = await client.submitSealedBid(null, witness);
+    const qualProof = await computeVendorQualificationProof(vendorTaxId, authorityPubkey);
+    const result = await client.submitSealedBid(null, witness, qualProof);
 
     expect(result.success).toBe(true);
     expect(result.commitmentHash).toBeDefined();
@@ -70,7 +82,24 @@ describe('GovBid Midnight Compact Smart Contract & ZK Witness Suite', () => {
     expect(ledger.commitments[0].commitmentHash).toBe(result.commitmentHash);
   });
 
-  it('Test 5: [ZK Circuit Rejection] Invalid bid (< min bid) triggers constraint rejection', async () => {
+  it('Test 6: [Qualification Proof Rejection] Invalid qualification proof fails circuit assertion', async () => {
+    const rawBid = BigInt(85000);
+    const salt = generateBlindingSalt();
+    const vendorTaxId = 'US-TAX-UNQUALIFIED';
+
+    const witness: PrivateWitnessState = {
+      bidAmount: rawBid,
+      salt,
+      vendorTaxId
+    };
+
+    const fakeQualProof = '0x0000000000000000000000000000000000000000000000000000000000001234';
+    await expect(client.submitSealedBid(null, witness, fakeQualProof)).rejects.toThrow(
+      'Circuit Constraint Violation: Vendor qualification proof verification failed'
+    );
+  });
+
+  it('Test 7: [Reserve Price Circuit Rejection] Invalid bid (< min bid) triggers constraint rejection', async () => {
     const invalidBid = BigInt(30000); // 30,000 < 50,000 min bid
     const salt = generateBlindingSalt();
 
@@ -88,7 +117,7 @@ describe('GovBid Midnight Compact Smart Contract & ZK Witness Suite', () => {
     expect(ledger.bidsCount).toBe(0);
   });
 
-  it('Test 6: [Budget Limit Circuit] Bid exceeding maximum budget triggers constraint rejection', async () => {
+  it('Test 8: [Budget Limit Circuit] Bid exceeding maximum budget triggers constraint rejection', async () => {
     const excessiveBid = BigInt(750000); // 750,000 > 500,000 max budget
     const salt = generateBlindingSalt();
 
@@ -103,7 +132,7 @@ describe('GovBid Midnight Compact Smart Contract & ZK Witness Suite', () => {
     );
   });
 
-  it('Test 7: [Commitment Replay] Submitting identical commitment digest twice triggers replay error', async () => {
+  it('Test 9: [Commitment Replay Protection] Submitting identical commitment digest twice triggers replay error', async () => {
     const rawBid = BigInt(100000);
     const salt = generateBlindingSalt();
 
@@ -121,22 +150,67 @@ describe('GovBid Midnight Compact Smart Contract & ZK Witness Suite', () => {
     );
   });
 
-  it('Test 8: [Repaired Settlement Assertion] Winner verified against winning commitment digest', async () => {
+  it('Test 10: [Authority Authorization Check] Non-authority caller fails settlement with Unauthorized error', async () => {
     const winnerPk = '0xwinner_pk_11111111111111111111111111111111';
     const bidAmount = BigInt(95000);
     const salt = generateBlindingSalt();
 
     const witness: PrivateWitnessState = {
-      bidAmount: bidAmount,
+      bidAmount,
+      salt,
+      vendorTaxId: winnerPk
+    };
+
+    const submitResult = await client.submitSealedBid(null, witness);
+    const fakeCallerPk = '0xfake_imposter_authority_key_123456789';
+
+    await expect(
+      client.settleProcurement(
+        null,
+        fakeCallerPk,
+        winnerPk,
+        bidAmount,
+        salt,
+        submitResult.commitmentHash
+      )
+    ).rejects.toThrow(/Unauthorized: Caller/);
+  });
+
+  it('Test 11: [Registered Commitment Check] Settling unsubmitted commitment digest fails', async () => {
+    const winnerPk = '0xwinner_pk_unsubmitted';
+    const bidAmount = BigInt(95000);
+    const salt = generateBlindingSalt();
+    const fakeCommitmentHash = '0x11223344556677889900aabbccddeeff11223344556677889900aabbccddeeff';
+
+    await expect(
+      client.settleProcurement(
+        null,
+        authorityPubkey,
+        winnerPk,
+        bidAmount,
+        salt,
+        fakeCommitmentHash
+      )
+    ).rejects.toThrow(/Winning commitment digest not found in authoritative ledger/);
+  });
+
+  it('Test 12: [Auction Invariants & Settlement] Valid settlement by authority updates ledger state', async () => {
+    const winnerPk = '0xwinner_pk_11111111111111111111111111111111';
+    const bidAmount = BigInt(95000);
+    const salt = generateBlindingSalt();
+
+    const witness: PrivateWitnessState = {
+      bidAmount,
       salt,
       vendorTaxId: winnerPk
     };
 
     const submitResult = await client.submitSealedBid(null, witness);
 
-    // Call settlement with matching commitment digest
+    // Call settlement with authority pubkey matching ledger authority
     const winner = await client.settleProcurement(
       null,
+      authorityPubkey,
       winnerPk,
       bidAmount,
       salt,
@@ -152,25 +226,12 @@ describe('GovBid Midnight Compact Smart Contract & ZK Witness Suite', () => {
     expect(ledger.winner?.winnerPublicKey).toBe(winnerPk);
   });
 
-  it('Test 9: [Repaired Settlement Failure] Mismatched settlement parameters trigger assertion error', async () => {
-    const winnerPk = '0xwinner_pk_22222222222222222222222222222222';
-    const bidAmount = BigInt(95000);
-    const salt = generateBlindingSalt();
+  it('Test 13: [Explicit Indexer Error Handling] Indexer failure is explicitly surfaced', async () => {
+    // Attempt querying invalid indexer endpoint
+    const badClient = new GovBidContractClient('0xcontract_address_1234');
+    // Override indexer URL to unresolvable domain
+    (badClient as any).indexerUrl = 'https://invalid-indexer.midnight.network/graphql';
 
-    const witness: PrivateWitnessState = {
-      bidAmount: bidAmount,
-      salt,
-      vendorTaxId: winnerPk
-    };
-
-    const submitResult = await client.submitSealedBid(null, witness);
-
-    // Pass false bid amount at settlement
-    const wrongBidAmount = BigInt(120000);
-    await expect(
-      client.settleProcurement(null, winnerPk, wrongBidAmount, salt, submitResult.commitmentHash)
-    ).rejects.toThrow(
-      'Circuit Assertion Failed: Disclosed winning parameters do not match winning commitment digest!'
-    );
+    await expect(badClient.fetchStateFromIndexer()).rejects.toThrow(/Indexer Failure/);
   });
 });

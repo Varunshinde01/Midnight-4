@@ -58,7 +58,7 @@ export async function connectMidnightWallet(preferredName?: string): Promise<Wal
   try {
     const api: ConnectedAPI = await targetWallet.connector.connect(PREPROD_NETWORK_ID);
 
-    let accountAddress: string | null = '0xmidnight_preprod_wallet_account';
+    let accountAddress: string | null = null;
     try {
       const unshielded = await api.getUnshieldedAddress();
       if (unshielded?.unshieldedAddress) {
@@ -69,8 +69,12 @@ export async function connectMidnightWallet(preferredName?: string): Promise<Wal
           accountAddress = shielded.shieldedAddress;
         }
       }
-    } catch {
-      // fallback
+    } catch (err: any) {
+      throw new Error(`Failed to retrieve address from connected Midnight wallet: ${err.message || err}`);
+    }
+
+    if (!accountAddress) {
+      throw new Error('Connected Midnight wallet did not return a valid account address');
     }
 
     return {

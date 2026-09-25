@@ -28,14 +28,15 @@ jobs:
       - name: Install Dependencies
         run: npm ci
 
-      - name: Verify Compact Smart Contract Syntax & Structure
+      - name: Verify & Compile Compact Smart Contract Syntax & AST
         run: |
+          npm run compile:compact
           test -f contract/GovBidProcurement.compact || (echo "GovBidProcurement.compact missing!" && exit 1)
           test -f contract/GovBidProcurement.ts || (echo "GovBidProcurement.ts missing!" && exit 1)
           test -f contract/deploy.ts || (echo "deploy.ts missing!" && exit 1)
-          echo "Compact smart contract files verified successfully."
+          echo "Compact smart contract compiled & verified successfully."
 
-      - name: Run Vitest Unit & ZK Witness Suite
+      - name: Run Vitest Unit, ZK Circuit & Invariant Suite
         run: npm test
 
       - name: Compile Production Build
